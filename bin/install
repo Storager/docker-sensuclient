@@ -1,0 +1,58 @@
+#!/bin/bash
+set -e
+
+if [ -n "$GEM_SOURCES" ] && ! [ -e "/tmp/gem_sources_added" ]; then
+	for src in $(echo $GEM_SOURCES | tr ',' ' ')
+	do
+		echo "Adding gem source $src"
+		gem sources -a $src
+	done
+	touch /tmp/gem_sources_added
+fi
+
+
+determine_params() {
+	IFS=/ read REPO PLUGIN <<< "${1}"
+	if [ -z "$PLUGIN" ]; then
+		PLUGIN=${REPO}
+		REPO=${DEFAULT_PLUGINS_REPO}
+	fi
+
+	IFS=@ read PLUGIN VERSION <<< "${PLUGIN}"
+	VERSION=${VERSION:-${DEFAULT_PLUGINS_VERSION}}
+}
+
+install(){
+	determine_params "$1"
+	echo -e "Downloading \t $REPO/$PLUGIN:$VERSION"
+	curl -Ls https://github.com/$REPO/sensu-plugins-$PLUGIN/archive/$VERSION.tar.gz > "$PLUGIN"
+	tar -xzf "$PLUGIN" && rm "$PLUGIN"
+
+	echo -e "Building \t $REPO/$PLUGIN:$VERSION"
+	cd sensu-plugins-$PLUGIN-$VERSION
+	sed -i'' '/signing_key/d' sensu-plugins-$PLUGIN.gemspec #We don't have the private key
+	gem build sensu-plugins-$PLUGIN.gemspec > /dev/null
+
+	echo -e "Installing \t $REPO/$PLUGIN:$VERSION"
+	gem install --force --no-ri --no-rdoc --no-wrapper sensu-plugins-*.gem > /dev/null
+	cd ..
+	rm -rf "sensu-plugins-$PLUGIN-$VERSION"
+	echo -e "Finished \t $REPO/$PLUGIN:$VERSION"
+}
+
+# Launch all plugins installations in parallel
+for index in "$@"
+do
+	install "$index" &
+done
+
+FAIL=0
+for job in `jobs -p`
+do
+    wait $job || let "FAIL=+1"
+done
+
+if [ "$FAIL" -ne "0" ]; then
+	exit $FAIL
+fi
+
